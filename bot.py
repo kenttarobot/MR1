@@ -6,7 +6,7 @@ import threading
 import requests
 
 # =====================================================
-# PREDATOR FINAL - AUTO FIND ANY GAME MODE
+# PREDATOR FINAL - AUTO FIND + ANTI 403 + ANTI 426
 # =====================================================
 
 BASE_URL = os.getenv("BASE_URL", "https://cdn.moltyroyale.com/api")
@@ -20,7 +20,7 @@ RETRY_DELAY = int(os.getenv("RETRY_DELAY", "5"))
 REJOIN_DELAY = int(os.getenv("REJOIN_DELAY", "10"))
 
 if not API_KEY:
-    raise Exception("API_KEY belum diisi")
+    raise Exception("API_KEY belum diisi di Railway Variables")
 
 # =====================================================
 # GLOBAL
@@ -37,17 +37,24 @@ stats = {
 }
 
 # =====================================================
-# REQUEST
+# HEADERS (ANTI 426)
 # =====================================================
 
 def headers():
     return {
         "X-API-Key": API_KEY,
-        "User-Agent": "PredatorBot/Final",
-        "Accept": "application/json",
-        "Content-Type": "application/json"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        "Origin": "https://moltyroyale.com",
+        "Referer": "https://moltyroyale.com/",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache"
     }
 
+# =====================================================
+# REQUEST
+# =====================================================
 
 def api_get(path):
     r = requests.get(
@@ -72,7 +79,7 @@ def api_post(path, payload=None):
     return r.json()
 
 # =====================================================
-# GAME FINDER
+# FIND GAME
 # =====================================================
 
 def get_waiting_game():
@@ -86,17 +93,16 @@ def get_waiting_game():
     for status in statuses:
         try:
             data = api_get(f"/games?status={status}")
-
             games = data.get("data", [])
 
             if games:
-                print(f"FOUND GAME STATUS: {status}")
+                print("FOUND GAME STATUS:", status)
                 return games[0]
 
         except:
             pass
 
-    # fallback all games
+    # fallback semua game
     try:
         data = api_get("/games")
         games = data.get("data", [])
@@ -111,15 +117,17 @@ def get_waiting_game():
     return None
 
 # =====================================================
-# REGISTER
+# REGISTER AGENT
 # =====================================================
 
 def register_agent(game_id, index):
+    payload = {
+        "name": f"{BOT_AGENT_NAME}-{index}-{random.randint(1000,9999)}"
+    }
+
     data = api_post(
         f"/games/{game_id}/agents/register",
-        {
-            "name": f"{BOT_AGENT_NAME}-{index}-{random.randint(1000,9999)}"
-        }
+        payload
     )
 
     return data["data"]["id"]
@@ -169,7 +177,7 @@ def safest_region(state):
     return sorted(cons, key=score)[0]
 
 # =====================================================
-# AI
+# AI ENGINE
 # =====================================================
 
 def decide_action(state):
@@ -249,10 +257,7 @@ def decide_action(state):
     safe = safest_region(state)
 
     if safe:
-        return {
-            "type": "move",
-            "regionId": safe
-        }
+        return {"type": "move", "regionId": safe}
 
     return {"type": "explore"}
 
@@ -291,7 +296,7 @@ def play_game(game_id, agent_id, index):
                 {
                     "action": action,
                     "thought": {
-                        "reasoning": "Auto Find Any Game",
+                        "reasoning": "Predator Final",
                         "plannedAction": action["type"]
                     }
                 }
@@ -339,7 +344,7 @@ def run_bot(index):
 
             play_game(game_id, agent_id, index)
 
-            print(f"[BOT {index}] REJOIN {REJOIN_DELAY}s")
+            print(f"[BOT {index}] REJOIN IN {REJOIN_DELAY}s")
 
             time.sleep(REJOIN_DELAY)
 
@@ -353,14 +358,14 @@ def run_bot(index):
             time.sleep(RETRY_DELAY)
 
 # =====================================================
-# STATS
+# LIVE STATS
 # =====================================================
 
 def stats_monitor():
     while True:
         with lock:
             print("===================================")
-            print("PREDATOR AUTO FIND LIVE STATS")
+            print("PREDATOR LIVE STATS")
             print("Games   :", stats["games"])
             print("Wins    :", stats["wins"])
             print("Deaths  :", stats["deaths"])
@@ -376,7 +381,7 @@ def stats_monitor():
 
 def main():
     print("===================================")
-    print("PREDATOR FINAL AUTO FIND ANY GAME")
+    print("PREDATOR FINAL - ANTI 426")
     print("Instances:", BOT_INSTANCES)
     print("===================================")
 
