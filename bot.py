@@ -6,7 +6,7 @@ import threading
 import requests
 
 # =====================================================
-# PREDATOR FINAL - AUTO FIND + ANTI 403 + ANTI 426
+# PREDATOR FINAL - DEBUG MODE
 # =====================================================
 
 BASE_URL = os.getenv("BASE_URL", "https://cdn.moltyroyale.com/api")
@@ -20,7 +20,7 @@ RETRY_DELAY = int(os.getenv("RETRY_DELAY", "5"))
 REJOIN_DELAY = int(os.getenv("REJOIN_DELAY", "10"))
 
 if not API_KEY:
-    raise Exception("API_KEY belum diisi di Railway Variables")
+    raise Exception("API_KEY belum diisi")
 
 # =====================================================
 # GLOBAL
@@ -37,19 +37,17 @@ stats = {
 }
 
 # =====================================================
-# HEADERS (ANTI 426)
+# HEADERS
 # =====================================================
 
 def headers():
     return {
         "X-API-Key": API_KEY,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0",
         "Accept": "application/json, text/plain, */*",
         "Content-Type": "application/json",
         "Origin": "https://moltyroyale.com",
-        "Referer": "https://moltyroyale.com/",
-        "Cache-Control": "no-cache",
-        "Pragma": "no-cache"
+        "Referer": "https://moltyroyale.com/"
     }
 
 # =====================================================
@@ -79,58 +77,58 @@ def api_post(path, payload=None):
     return r.json()
 
 # =====================================================
-# FIND GAME
+# DEBUG GAME FINDER
 # =====================================================
 
 def get_waiting_game():
-    statuses = [
-        "waiting",
-        "open",
-        "pending",
-        "available"
-    ]
-
-    for status in statuses:
-        try:
-            data = api_get(f"/games?status={status}")
-            games = data.get("data", [])
-
-            if games:
-                print("FOUND GAME STATUS:", status)
-                return games[0]
-
-        except:
-            pass
-
-    # fallback semua game
     try:
         data = api_get("/games")
-        games = data.get("data", [])
 
-        if games:
-            print("FOUND GAME FROM /games")
-            return games[0]
+        print("===================================")
+        print("DEBUG /games RESPONSE:")
+        print(data)
+        print("===================================")
 
-    except:
-        pass
+        # format 1
+        if isinstance(data, dict) and "data" in data:
+            if data["data"]:
+                return data["data"][0]
+
+        # format 2
+        if isinstance(data, dict) and "games" in data:
+            if data["games"]:
+                return data["games"][0]
+
+        # format 3
+        if isinstance(data, list):
+            if data:
+                return data[0]
+
+    except Exception as e:
+        print("DEBUG ERROR:", e)
 
     return None
 
 # =====================================================
-# REGISTER AGENT
+# REGISTER
 # =====================================================
 
 def register_agent(game_id, index):
-    payload = {
-        "name": f"{BOT_AGENT_NAME}-{index}-{random.randint(1000,9999)}"
-    }
-
     data = api_post(
         f"/games/{game_id}/agents/register",
-        payload
+        {
+            "name": f"{BOT_AGENT_NAME}-{index}-{random.randint(1000,9999)}"
+        }
     )
 
-    return data["data"]["id"]
+    # kemungkinan format berbeda
+    if "data" in data and "id" in data["data"]:
+        return data["data"]["id"]
+
+    if "id" in data:
+        return data["id"]
+
+    raise Exception("REGISTER RESPONSE UNKNOWN")
 
 # =====================================================
 # HELPERS
@@ -177,7 +175,7 @@ def safest_region(state):
     return sorted(cons, key=score)[0]
 
 # =====================================================
-# AI ENGINE
+# AI
 # =====================================================
 
 def decide_action(state):
@@ -198,25 +196,21 @@ def decide_action(state):
         if m["regionId"] == me["regionId"]
     ]
 
-    # death zone
     if state["currentRegion"].get("isDeathZone"):
         safe = safest_region(state)
 
         if safe:
             return {"type": "move", "regionId": safe}
 
-    # heal
     if hp <= 35:
         item = heal_item(me["inventory"])
 
         if item:
             return {"type": "use_item", "itemId": item["id"]}
 
-    # rest
     if ep <= 1:
         return {"type": "rest"}
 
-    # equip
     bw = best_weapon(me["inventory"])
 
     if bw:
@@ -225,7 +219,6 @@ def decide_action(state):
         if not eq or eq["id"] != bw["id"]:
             return {"type": "equip", "itemId": bw["id"]}
 
-    # attack player
     if same_agents:
         target = min(same_agents, key=lambda x: x["hp"])
 
@@ -235,7 +228,6 @@ def decide_action(state):
             "targetType": "agent"
         }
 
-    # attack monster
     if same_monsters:
         target = min(same_monsters, key=lambda x: x.get("hp", 999))
 
@@ -245,7 +237,6 @@ def decide_action(state):
             "targetType": "monster"
         }
 
-    # loot
     for item in state.get("visibleItems", []):
         if item["regionId"] == me["regionId"]:
             return {
@@ -253,7 +244,6 @@ def decide_action(state):
                 "itemId": item["item"]["id"]
             }
 
-    # move
     safe = safest_region(state)
 
     if safe:
@@ -270,7 +260,10 @@ def play_game(game_id, agent_id, index):
         try:
             state = api_get(
                 f"/games/{game_id}/agents/{agent_id}/state"
-            )["data"]
+            )
+
+            if "data" in state:
+                state = state["data"]
 
             if not state["self"]["isAlive"]:
                 with lock:
@@ -296,7 +289,7 @@ def play_game(game_id, agent_id, index):
                 {
                     "action": action,
                     "thought": {
-                        "reasoning": "Predator Final",
+                        "reasoning": "Debug Mode",
                         "plannedAction": action["type"]
                     }
                 }
@@ -358,14 +351,14 @@ def run_bot(index):
             time.sleep(RETRY_DELAY)
 
 # =====================================================
-# LIVE STATS
+# STATS
 # =====================================================
 
 def stats_monitor():
     while True:
         with lock:
             print("===================================")
-            print("PREDATOR LIVE STATS")
+            print("PREDATOR DEBUG LIVE STATS")
             print("Games   :", stats["games"])
             print("Wins    :", stats["wins"])
             print("Deaths  :", stats["deaths"])
@@ -381,7 +374,7 @@ def stats_monitor():
 
 def main():
     print("===================================")
-    print("PREDATOR FINAL - ANTI 426")
+    print("PREDATOR FINAL DEBUG MODE")
     print("Instances:", BOT_INSTANCES)
     print("===================================")
 
