@@ -6,23 +6,34 @@ import threading
 import requests
 
 # =====================================================
-# PREDATOR V5 PROFESSIONAL MULTI THREAD
+# PREDATOR V5 FINAL - RAILWAY STABLE (NO 409)
 # =====================================================
 
 BASE_URL = os.getenv("BASE_URL", "https://cdn.moltyroyale.com/api")
 
-BOT_ACCOUNT_NAME = os.getenv("BOT_ACCOUNT_NAME", "PredatorV5")
-BOT_AGENT_NAME = os.getenv("BOT_AGENT_NAME", "THREAD-HUNTER")
-WALLET_ADDRESS = os.getenv("WALLET_ADDRESS", "0xYourWallet")
+# API KEY dari account yang sudah dibuat sebelumnya
+API_KEY = os.getenv("API_KEY")
 
-BOT_INSTANCES = int(os.getenv("BOT_INSTANCES", "5"))
+# Nama agent bot
+BOT_AGENT_NAME = os.getenv("BOT_AGENT_NAME", "PREDATOR")
 
+# Jumlah thread bot
+BOT_INSTANCES = int(os.getenv("BOT_INSTANCES", "1"))
+
+# Delay config
 TURN_DELAY = int(os.getenv("TURN_DELAY", "58"))
 RETRY_DELAY = int(os.getenv("RETRY_DELAY", "5"))
 REJOIN_DELAY = int(os.getenv("REJOIN_DELAY", "10"))
 
 # =====================================================
-# GLOBAL LOCK + STATS
+# VALIDASI
+# =====================================================
+
+if not API_KEY:
+    raise Exception("API_KEY belum diisi di Railway Variables")
+
+# =====================================================
+# GLOBAL STATS
 # =====================================================
 
 lock = threading.Lock()
@@ -36,7 +47,7 @@ stats = {
 }
 
 # =====================================================
-# API
+# API HELPERS
 # =====================================================
 
 def api_get(path):
@@ -45,11 +56,10 @@ def api_get(path):
     return r.json()
 
 
-def api_post(path, payload=None, api_key=None):
-    headers = {}
-
-    if api_key:
-        headers["X-API-Key"] = api_key
+def api_post(path, payload=None):
+    headers = {
+        "X-API-Key": API_KEY
+    }
 
     r = requests.post(
         f"{BASE_URL}{path}",
@@ -62,17 +72,8 @@ def api_post(path, payload=None, api_key=None):
     return r.json()
 
 # =====================================================
-# HELPERS
+# GAME HELPERS
 # =====================================================
-
-def create_account(index):
-    data = api_post("/accounts", {
-        "name": f"{BOT_ACCOUNT_NAME}-{index}",
-        "wallet_address": WALLET_ADDRESS
-    })["data"]
-
-    return data["accountId"], data["apiKey"]
-
 
 def get_waiting_game():
     games = api_get("/games?status=waiting")["data"]
@@ -83,33 +84,15 @@ def get_waiting_game():
     return games[0]
 
 
-def register_agent(game_id, api_key, index):
+def register_agent(game_id, index):
     data = api_post(
         f"/games/{game_id}/agents/register",
-        {"name": f"{BOT_AGENT_NAME}-{index}"},
-        api_key
+        {
+            "name": f"{BOT_AGENT_NAME}-{index}-{random.randint(1000,9999)}"
+        }
     )["data"]
 
     return data["id"]
-
-
-def safest_region(state):
-    region = state["currentRegion"]
-    cons = region.get("connections", [])
-
-    if not cons:
-        return None
-
-    def score(r):
-        s = 0
-
-        for a in state.get("visibleAgents", []):
-            if a["isAlive"] and a["regionId"] == r:
-                s += 5
-
-        return s
-
-    return sorted(cons, key=score)[0]
 
 
 def best_weapon(inv):
@@ -129,23 +112,44 @@ def heal_item(inv):
 
     return heals[0]
 
+
+def safest_region(state):
+    region = state["currentRegion"]
+    cons = region.get("connections", [])
+
+    if not cons:
+        return None
+
+    def score(region_id):
+        danger = 0
+
+        for a in state.get("visibleAgents", []):
+            if a["isAlive"] and a["regionId"] == region_id:
+                danger += 5
+
+        for m in state.get("visibleMonsters", []):
+            if m["regionId"] == region_id:
+                danger += 1
+
+        return danger
+
+    return sorted(cons, key=score)[0]
+
 # =====================================================
-# AI
+# AI ENGINE
 # =====================================================
 
 def decide_action(state):
     me = state["self"]
+
     hp = me["hp"]
     ep = me["ep"]
 
-    visible_agents = [
-        a for a in state.get("visibleAgents", [])
-        if a["isAlive"] and a["id"] != me["id"]
-    ]
-
     same_agents = [
-        a for a in visible_agents
-        if a["regionId"] == me["regionId"]
+        a for a in state.get("visibleAgents", [])
+        if a["isAlive"]
+        and a["id"] != me["id"]
+        and a["regionId"] == me["regionId"]
     ]
 
     same_monsters = [
@@ -169,35 +173,39 @@ def decide_action(state):
     if ep <= 1:
         return {"type": "rest"}
 
-    # equip
+    # equip weapon
     bw = best_weapon(me["inventory"])
+
     if bw:
         eq = me.get("equippedWeapon")
 
         if not eq or eq["id"] != bw["id"]:
-            return {"type": "equip", "itemId": bw["id"]}
+            return {
+                "type": "equip",
+                "itemId": bw["id"]
+            }
 
     # attack player
     if same_agents:
-        t = min(same_agents, key=lambda x: x["hp"])
+        target = min(same_agents, key=lambda x: x["hp"])
 
         return {
             "type": "attack",
-            "targetId": t["id"],
+            "targetId": target["id"],
             "targetType": "agent"
         }
 
     # attack monster
     if same_monsters:
-        t = min(same_monsters, key=lambda x: x.get("hp", 999))
+        target = min(same_monsters, key=lambda x: x.get("hp", 999))
 
         return {
             "type": "attack",
-            "targetId": t["id"],
+            "targetId": target["id"],
             "targetType": "monster"
         }
 
-    # loot
+    # pickup loot
     for item in state.get("visibleItems", []):
         if item["regionId"] == me["regionId"]:
             return {
@@ -207,16 +215,21 @@ def decide_action(state):
 
     # move
     safe = safest_region(state)
-    if safe:
-        return {"type": "move", "regionId": safe}
 
+    if safe:
+        return {
+            "type": "move",
+            "regionId": safe
+        }
+
+    # default
     return {"type": "explore"}
 
 # =====================================================
 # PLAY GAME
 # =====================================================
 
-def play_game(game_id, agent_id, api_key, index):
+def play_game(game_id, agent_id, index):
     while True:
         try:
             state = api_get(
@@ -247,11 +260,10 @@ def play_game(game_id, agent_id, api_key, index):
                 {
                     "action": action,
                     "thought": {
-                        "reasoning": "Professional Multi Thread",
+                        "reasoning": "Predator V5 Final",
                         "plannedAction": action["type"]
                     }
-                },
-                api_key
+                }
             )
 
             with lock:
@@ -268,16 +280,12 @@ def play_game(game_id, agent_id, api_key, index):
         time.sleep(TURN_DELAY)
 
 # =====================================================
-# BOT THREAD
+# BOT LOOP
 # =====================================================
 
 def run_bot(index):
     while True:
         try:
-            account_id, api_key = create_account(index)
-
-            print(f"[BOT {index}] ACCOUNT:", account_id)
-
             game = None
 
             while not game:
@@ -289,14 +297,16 @@ def run_bot(index):
 
             game_id = game["id"]
 
-            agent_id = register_agent(game_id, api_key, index)
+            print(f"[BOT {index}] JOIN:", game["name"])
+
+            agent_id = register_agent(game_id, index)
 
             with lock:
                 stats["games"] += 1
 
-            print(f"[BOT {index}] JOINED:", game["name"])
+            print(f"[BOT {index}] REGISTERED:", agent_id)
 
-            play_game(game_id, agent_id, api_key, index)
+            play_game(game_id, agent_id, index)
 
             print(f"[BOT {index}] REJOIN IN {REJOIN_DELAY}s")
 
@@ -312,19 +322,19 @@ def run_bot(index):
             time.sleep(RETRY_DELAY)
 
 # =====================================================
-# LIVE STATS THREAD
+# LIVE STATS
 # =====================================================
 
 def stats_monitor():
     while True:
         with lock:
             print("===================================")
-            print(" LIVE STATS")
-            print(" Games  :", stats["games"])
-            print(" Wins   :", stats["wins"])
-            print(" Deaths :", stats["deaths"])
-            print(" Actions:", stats["actions"])
-            print(" Errors :", stats["errors"])
+            print("PREDATOR V5 FINAL LIVE STATS")
+            print("Games   :", stats["games"])
+            print("Wins    :", stats["wins"])
+            print("Deaths  :", stats["deaths"])
+            print("Actions :", stats["actions"])
+            print("Errors  :", stats["errors"])
             print("===================================")
 
         time.sleep(60)
@@ -335,24 +345,24 @@ def stats_monitor():
 
 def main():
     print("===================================")
-    print("PREDATOR PROFESSIONAL MULTI THREAD")
+    print("PREDATOR V5 FINAL - NO 409")
     print("Instances:", BOT_INSTANCES)
     print("===================================")
 
-    # stats thread
-    threading.Thread(target=stats_monitor, daemon=True).start()
-
-    # bot threads
-    threads = []
+    threading.Thread(
+        target=stats_monitor,
+        daemon=True
+    ).start()
 
     for i in range(1, BOT_INSTANCES + 1):
-        t = threading.Thread(target=run_bot, args=(i,), daemon=True)
-        t.start()
-        threads.append(t)
+        threading.Thread(
+            target=run_bot,
+            args=(i,),
+            daemon=True
+        ).start()
 
         time.sleep(2)
 
-    # keep main alive
     while True:
         time.sleep(9999)
 
