@@ -6,20 +6,20 @@ import threading
 import requests
 
 # =====================================================
-# PREDATOR FINAL STABLE
-# Anti 403 / Anti 426 / Anti 500
-# Railway Ready
+# PREDATOR V8 - FREE ROOM SNIPER
+# Fokus: masuk room FREE tercepat
 # =====================================================
 
 BASE_URL = os.getenv("BASE_URL", "https://cdn.moltyroyale.com/api")
 
 API_KEY = os.getenv("API_KEY")
-BOT_AGENT_NAME = os.getenv("BOT_AGENT_NAME", "PREDATOR")
-BOT_INSTANCES = int(os.getenv("BOT_INSTANCES", "1"))
+BOT_AGENT_NAME = os.getenv("BOT_AGENT_NAME", "SNIPER")
+BOT_INSTANCES = int(os.getenv("BOT_INSTANCES", "3"))
 
+# scan cepat
+RETRY_DELAY = float(os.getenv("RETRY_DELAY", "0.5"))
 TURN_DELAY = int(os.getenv("TURN_DELAY", "58"))
-RETRY_DELAY = int(os.getenv("RETRY_DELAY", "10"))
-REJOIN_DELAY = int(os.getenv("REJOIN_DELAY", "10"))
+REJOIN_DELAY = int(os.getenv("REJOIN_DELAY", "2"))
 
 if not API_KEY:
     raise Exception("API_KEY belum diisi")
@@ -31,10 +31,10 @@ if not API_KEY:
 lock = threading.Lock()
 
 stats = {
-    "games": 0,
+    "scan": 0,
+    "join": 0,
     "wins": 0,
     "deaths": 0,
-    "actions": 0,
     "errors": 0
 }
 
@@ -45,7 +45,7 @@ stats = {
 def headers():
     return {
         "X-API-Key": API_KEY,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "User-Agent": "Mozilla/5.0",
         "Accept": "application/json, text/plain, */*",
         "Content-Type": "application/json",
         "Origin": "https://moltyroyale.com",
@@ -53,16 +53,15 @@ def headers():
     }
 
 # =====================================================
-# REQUEST HELPERS
+# REQUEST
 # =====================================================
 
 def api_get(path):
     r = requests.get(
         f"{BASE_URL}{path}",
         headers=headers(),
-        timeout=20
+        timeout=10
     )
-
     r.raise_for_status()
     return r.json()
 
@@ -72,49 +71,60 @@ def api_post(path, payload=None):
         f"{BASE_URL}{path}",
         json=payload or {},
         headers=headers(),
-        timeout=20
+        timeout=10
     )
-
     r.raise_for_status()
     return r.json()
 
 # =====================================================
-# FIND GAME (ANTI 500)
+# GAME SNIPER
 # =====================================================
 
-def get_waiting_game():
-    paths = [
-        "/games?status=waiting",
-        "/games?status=open",
-        "/games?status=pending",
-        "/games"
-    ]
+def get_free_room():
+    try:
+        data = api_get("/games")
 
-    for path in paths:
-        try:
-            data = api_get(path)
+        with lock:
+            stats["scan"] += 1
 
-            print("SUCCESS:", path)
+        games = []
 
-            # format dict:data[]
-            if isinstance(data, dict):
-                if "data" in data and data["data"]:
-                    return data["data"][0]
+        if isinstance(data, dict):
+            games = data.get("data", []) or data.get("games", [])
 
-                if "games" in data and data["games"]:
-                    return data["games"][0]
+        elif isinstance(data, list):
+            games = data
 
-            # format list[]
-            if isinstance(data, list) and data:
-                return data[0]
+        # filter room free + belum penuh
+        free_rooms = []
 
-        except Exception as e:
-            print("FAILED:", path, e)
+        for g in games:
+            if g.get("entryType") != "free":
+                continue
 
-    return None
+            count = g.get("agentCount", 999)
+            max_count = g.get("maxAgents", 0)
+
+            if count < max_count:
+                free_rooms.append(g)
+
+        if not free_rooms:
+            return None
+
+        # urut room terbaru
+        free_rooms.sort(
+            key=lambda x: x.get("createdAt", ""),
+            reverse=True
+        )
+
+        return free_rooms[0]
+
+    except Exception as e:
+        print("SCAN ERROR:", e)
+        return None
 
 # =====================================================
-# REGISTER AGENT
+# REGISTER
 # =====================================================
 
 def register_agent(game_id, index):
@@ -127,7 +137,7 @@ def register_agent(game_id, index):
         payload
     )
 
-    if "data" in data and "id" in data["data"]:
+    if "data" in data:
         return data["data"]["id"]
 
     if "id" in data:
@@ -136,114 +146,39 @@ def register_agent(game_id, index):
     raise Exception("REGISTER FAILED")
 
 # =====================================================
-# HELPERS
-# =====================================================
-
-def best_weapon(inv):
-    weapons = [x for x in inv if x.get("category") == "weapon"]
-
-    if not weapons:
-        return None
-
-    return max(weapons, key=lambda x: x.get("atkBonus", 0))
-
-
-def heal_item(inv):
-    heals = [x for x in inv if x.get("category") == "recovery"]
-
-    if not heals:
-        return None
-
-    return heals[0]
-
-
-def safest_region(state):
-    region = state["currentRegion"]
-    cons = region.get("connections", [])
-
-    if not cons:
-        return None
-
-    def score(region_id):
-        danger = 0
-
-        for a in state.get("visibleAgents", []):
-            if a["isAlive"] and a["regionId"] == region_id:
-                danger += 5
-
-        for m in state.get("visibleMonsters", []):
-            if m["regionId"] == region_id:
-                danger += 1
-
-        return danger
-
-    return sorted(cons, key=score)[0]
-
-# =====================================================
-# AI ENGINE
+# SIMPLE AI
 # =====================================================
 
 def decide_action(state):
     me = state["self"]
 
-    hp = me["hp"]
-    ep = me["ep"]
-
-    same_agents = [
-        a for a in state.get("visibleAgents", [])
-        if a["isAlive"]
-        and a["id"] != me["id"]
-        and a["regionId"] == me["regionId"]
-    ]
-
-    same_monsters = [
-        m for m in state.get("visibleMonsters", [])
-        if m["regionId"] == me["regionId"]
-    ]
-
-    # death zone
-    if state["currentRegion"].get("isDeathZone"):
-        safe = safest_region(state)
-        if safe:
-            return {"type": "move", "regionId": safe}
-
     # heal
-    if hp <= 35:
-        item = heal_item(me["inventory"])
-        if item:
-            return {"type": "use_item", "itemId": item["id"]}
+    if me["hp"] <= 35:
+        for item in me["inventory"]:
+            if item.get("category") == "recovery":
+                return {
+                    "type": "use_item",
+                    "itemId": item["id"]
+                }
 
-    # rest
-    if ep <= 1:
-        return {"type": "rest"}
+    # enemy nearby
+    for a in state.get("visibleAgents", []):
+        if a["isAlive"] and a["id"] != me["id"]:
+            if a["regionId"] == me["regionId"]:
+                return {
+                    "type": "attack",
+                    "targetId": a["id"],
+                    "targetType": "agent"
+                }
 
-    # equip
-    bw = best_weapon(me["inventory"])
-    if bw:
-        eq = me.get("equippedWeapon")
-
-        if not eq or eq["id"] != bw["id"]:
-            return {"type": "equip", "itemId": bw["id"]}
-
-    # attack player
-    if same_agents:
-        target = min(same_agents, key=lambda x: x["hp"])
-
-        return {
-            "type": "attack",
-            "targetId": target["id"],
-            "targetType": "agent"
-        }
-
-    # attack monster
-    if same_monsters:
-        target = min(same_monsters, key=lambda x: x.get("hp", 999))
-
-        return {
-            "type": "attack",
-            "targetId": target["id"],
-            "targetType": "monster"
-        }
+    # monster nearby
+    for m in state.get("visibleMonsters", []):
+        if m["regionId"] == me["regionId"]:
+            return {
+                "type": "attack",
+                "targetId": m["id"],
+                "targetType": "monster"
+            }
 
     # loot
     for item in state.get("visibleItems", []):
@@ -253,16 +188,10 @@ def decide_action(state):
                 "itemId": item["item"]["id"]
             }
 
-    # move
-    safe = safest_region(state)
-
-    if safe:
-        return {"type": "move", "regionId": safe}
-
     return {"type": "explore"}
 
 # =====================================================
-# PLAY GAME
+# PLAY
 # =====================================================
 
 def play_game(game_id, agent_id, index):
@@ -285,8 +214,8 @@ def play_game(game_id, agent_id, index):
             if state.get("gameStatus") == "finished":
                 result = state.get("result", {})
 
-                with lock:
-                    if result.get("isWinner"):
+                if result.get("isWinner"):
+                    with lock:
                         stats["wins"] += 1
 
                 print(f"[BOT {index}] FINISHED")
@@ -296,58 +225,48 @@ def play_game(game_id, agent_id, index):
 
             api_post(
                 f"/games/{game_id}/agents/{agent_id}/action",
-                {
-                    "action": action,
-                    "thought": {
-                        "reasoning": "Predator Stable",
-                        "plannedAction": action["type"]
-                    }
-                }
+                {"action": action}
             )
-
-            with lock:
-                stats["actions"] += 1
 
             print(f"[BOT {index}] {action['type']}")
 
         except Exception as e:
-            with lock:
-                stats["errors"] += 1
-
             print(f"[BOT {index}] TURN ERROR:", e)
 
         time.sleep(TURN_DELAY)
 
 # =====================================================
-# BOT LOOP
+# THREAD LOOP
 # =====================================================
 
 def run_bot(index):
     while True:
         try:
-            game = None
+            room = None
 
-            while not game:
-                game = get_waiting_game()
+            while not room:
+                room = get_free_room()
 
-                if not game:
-                    print(f"[BOT {index}] NO GAME FOUND")
+                if not room:
+                    print(f"[BOT {index}] WAIT FREE ROOM")
                     time.sleep(RETRY_DELAY)
 
-            game_id = game["id"]
+            gid = room["id"]
 
-            print(f"[BOT {index}] JOIN:", game.get("name", game_id))
+            print(
+                f"[BOT {index}] FREE ROOM FOUND:",
+                room.get("name", gid),
+                f"{room.get('agentCount',0)}/{room.get('maxAgents',0)}"
+            )
 
-            agent_id = register_agent(game_id, index)
-
-            print(f"[BOT {index}] REGISTERED:", agent_id)
+            agent_id = register_agent(gid, index)
 
             with lock:
-                stats["games"] += 1
+                stats["join"] += 1
 
-            play_game(game_id, agent_id, index)
+            print(f"[BOT {index}] JOIN SUCCESS:", agent_id)
 
-            print(f"[BOT {index}] REJOIN IN {REJOIN_DELAY}s")
+            play_game(gid, agent_id, index)
 
             time.sleep(REJOIN_DELAY)
 
@@ -361,22 +280,22 @@ def run_bot(index):
             time.sleep(RETRY_DELAY)
 
 # =====================================================
-# LIVE STATS
+# MONITOR
 # =====================================================
 
-def stats_monitor():
+def monitor():
     while True:
         with lock:
             print("===================================")
-            print("PREDATOR FINAL STATS")
-            print("Games   :", stats["games"])
-            print("Wins    :", stats["wins"])
-            print("Deaths  :", stats["deaths"])
-            print("Actions :", stats["actions"])
-            print("Errors  :", stats["errors"])
+            print("PREDATOR V8 FREE ROOM SNIPER")
+            print("Scan   :", stats["scan"])
+            print("Join   :", stats["join"])
+            print("Wins   :", stats["wins"])
+            print("Deaths :", stats["deaths"])
+            print("Errors :", stats["errors"])
             print("===================================")
 
-        time.sleep(60)
+        time.sleep(30)
 
 # =====================================================
 # MAIN
@@ -384,12 +303,12 @@ def stats_monitor():
 
 def main():
     print("===================================")
-    print("PREDATOR FINAL STABLE")
+    print("PREDATOR V8 FREE ROOM SNIPER")
     print("Instances:", BOT_INSTANCES)
     print("===================================")
 
     threading.Thread(
-        target=stats_monitor,
+        target=monitor,
         daemon=True
     ).start()
 
@@ -400,7 +319,7 @@ def main():
             daemon=True
         ).start()
 
-        time.sleep(2)
+        time.sleep(0.2)
 
     while True:
         time.sleep(9999)
