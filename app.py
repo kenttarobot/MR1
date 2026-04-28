@@ -5,43 +5,47 @@ import threading
 import time
 import random
 
-app = Flask(__name__)
+# ==================================================
+# APP
+# ==================================================
 
-# ==========================================
-# CONFIG
-# ==========================================
+app = Flask(__name__)
 
 PORT = int(os.getenv("PORT", "8080"))
 SETTINGS_FILE = "settings.json"
 
-# ==========================================
+# ==================================================
 # DEFAULT SETTINGS
-# ==========================================
+# ==================================================
 
 DEFAULT_SETTINGS = {
     "running": False,
-    "mode": "auto",          # auto / manual
+    "mode": "auto",        # auto / manual
     "room_id": "",
     "instances": 1,
     "scan_delay": 5
 }
 
-# ==========================================
-# GLOBAL STATS
-# ==========================================
+# ==================================================
+# STATS
+# ==================================================
 
 stats = {
+    "status": "idle",
     "scan": 0,
     "join": 0,
     "wins": 0,
     "deaths": 0,
-    "errors": 0,
-    "status": "idle"
+    "errors": 0
 }
 
-# ==========================================
-# SETTINGS HELPER
-# ==========================================
+# ==================================================
+# SETTINGS
+# ==================================================
+
+def save_settings(data):
+    with open(SETTINGS_FILE, "w") as f:
+        json.dump(data, f, indent=2)
 
 def load_settings():
     try:
@@ -51,67 +55,73 @@ def load_settings():
         save_settings(DEFAULT_SETTINGS)
         return DEFAULT_SETTINGS.copy()
 
-def save_settings(data):
-    with open(SETTINGS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
-# ==========================================
-# BOT LOOP (SIMULASI / TEMPAT ENGINE BOT)
-# ==========================================
+# ==================================================
+# BOT LOOP
+# ==================================================
 
 def bot_loop():
     while True:
-        cfg = load_settings()
-
-        if not cfg["running"]:
-            stats["status"] = "stopped"
-            time.sleep(3)
-            continue
-
         try:
+            cfg = load_settings()
+
+            if not cfg["running"]:
+                stats["status"] = "stopped"
+                time.sleep(3)
+                continue
+
             stats["status"] = "running"
 
+            # -----------------------------
+            # MANUAL ROOM MODE
+            # -----------------------------
             if cfg["mode"] == "manual":
-                # join room manual
                 room = cfg["room_id"]
 
                 if room:
                     print("JOIN ROOM:", room)
                     stats["join"] += 1
 
+            # -----------------------------
+            # AUTO MODE
+            # -----------------------------
             else:
-                # auto scan room
                 print("SCAN FREE ROOM...")
                 stats["scan"] += 1
 
-                # simulasi kadang join
-                if random.randint(1, 5) == 1:
+                if random.randint(1, 4) == 1:
                     stats["join"] += 1
 
             time.sleep(cfg["scan_delay"])
 
-        except Exception:
+        except Exception as e:
+            print("BOT ERROR:", e)
             stats["errors"] += 1
             time.sleep(5)
 
-# ==========================================
-# START BACKGROUND THREAD
-# ==========================================
+# ==================================================
+# START BACKGROUND BOT
+# ==================================================
 
 threading.Thread(
     target=bot_loop,
     daemon=True
 ).start()
 
-# ==========================================
+# ==================================================
 # ROUTES
-# ==========================================
+# ==================================================
 
-@app.route("/")
+@app.route("/", methods=["GET"])
 def home():
     return jsonify({
         "name": "Predator Hybrid Final",
         "status": "online"
+    })
+
+@app.route("/api/test", methods=["GET"])
+def test():
+    return jsonify({
+        "success": True
     })
 
 @app.route("/api/settings", methods=["GET"])
@@ -122,9 +132,11 @@ def get_settings():
 def update_settings():
     data = request.json
     save_settings(data)
-    return jsonify({"success": True})
+    return jsonify({
+        "success": True
+    })
 
-@app.route("/api/stats")
+@app.route("/api/stats", methods=["GET"])
 def get_stats():
     return jsonify(stats)
 
@@ -133,17 +145,25 @@ def start_bot():
     cfg = load_settings()
     cfg["running"] = True
     save_settings(cfg)
-    return jsonify({"success": True, "message": "Bot started"})
+
+    return jsonify({
+        "success": True,
+        "message": "bot started"
+    })
 
 @app.route("/api/stop", methods=["POST"])
 def stop_bot():
     cfg = load_settings()
     cfg["running"] = False
     save_settings(cfg)
-    return jsonify({"success": True, "message": "Bot stopped"})
+
+    return jsonify({
+        "success": True,
+        "message": "bot stopped"
+    })
 
 @app.route("/api/manual/<room_id>", methods=["POST"])
-def manual_room(room_id):
+def manual_mode(room_id):
     cfg = load_settings()
     cfg["mode"] = "manual"
     cfg["room_id"] = room_id
@@ -166,9 +186,9 @@ def auto_mode():
         "mode": "auto"
     })
 
-# ==========================================
+# ==================================================
 # MAIN
-# ==========================================
+# ==================================================
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=PORT)
