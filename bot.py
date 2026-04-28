@@ -1,313 +1,123 @@
-# =====================================================
-# PREDATOR HYBRID FINAL
-# Auto Scan + Manual Room Mode
-# Railway Ready
-# =====================================================
-
 import os
 import time
-import json
 import random
-import threading
-import traceback
 import requests
-from flask import Flask, request, jsonify
-
-# =====================================================
-# CONFIG
-# =====================================================
 
 BASE_URL = "https://cdn.moltyroyale.com/api"
-
 API_KEY = os.getenv("API_KEY")
-PORT = int(os.getenv("PORT", "5000"))
 
-if not API_KEY:
-    raise Exception("API_KEY belum diisi")
-
-SETTINGS_FILE = "settings.json"
-
-# =====================================================
-# DEFAULT SETTINGS
-# =====================================================
-
-DEFAULT_SETTINGS = {
-    "running": False,
-    "mode": "auto",          # auto / manual
-    "room_id": "",
-    "instances": 1,
-    "fast_scan": 1,
-    "slow_scan": 15
-}
-
-# =====================================================
-# GLOBAL
-# =====================================================
-
-lock = threading.Lock()
-
-stats = {
-    "scan": 0,
-    "join": 0,
-    "wins": 0,
-    "deaths": 0,
-    "errors": 0,
-    "server_fail": 0
-}
-
-# =====================================================
-# SETTINGS
-# =====================================================
-
-def load_settings():
-    try:
-        with open(SETTINGS_FILE, "r") as f:
-            return json.load(f)
-    except:
-        save_settings(DEFAULT_SETTINGS)
-        return DEFAULT_SETTINGS.copy()
-
-
-def save_settings(data):
-    with open(SETTINGS_FILE, "w") as f:
-        json.dump(data, f, indent=2)
-
-# =====================================================
-# REQUEST
-# =====================================================
+SCAN_DELAY = 10
+ERROR_DELAY = 20
 
 def headers():
     return {
         "X-API-Key": API_KEY,
         "User-Agent": "Mozilla/5.0",
-        "Accept": "application/json, text/plain, */*",
         "Content-Type": "application/json",
-        "Origin": "https://moltyroyale.com",
-        "Referer": "https://moltyroyale.com/"
+        "Accept": "application/json"
     }
 
-
-def api_get(path):
-    r = requests.get(
-        f"{BASE_URL}{path}",
-        headers=headers(),
-        timeout=10
-    )
-    r.raise_for_status()
-    return r.json()
-
-
-def api_post(path, payload=None):
-    r = requests.post(
-        f"{BASE_URL}{path}",
-        json=payload or {},
-        headers=headers(),
-        timeout=10
-    )
-    r.raise_for_status()
-    return r.json()
-
-# =====================================================
-# AUTO SCAN ROOM
-# =====================================================
-
-def parse_games(data):
-    if isinstance(data, dict):
-        return data.get("data", []) or data.get("games", [])
-    if isinstance(data, list):
-        return data
-    return []
-
-
-def choose_room(games):
-    rooms = []
-
-    for g in games:
-        if g.get("entryType") != "free":
-            continue
-
-        if g.get("agentCount", 999) < g.get("maxAgents", 0):
-            rooms.append(g)
-
-    if not rooms:
-        return None
-
-    rooms.sort(
-        key=lambda x: (
-            x.get("agentCount", 999),
-            x.get("createdAt", "")
-        )
-    )
-
-    return rooms[0]
-
-
-def auto_find_room():
-    endpoints = [
+def get_rooms():
+    urls = [
         "/games?status=waiting",
         "/games?status=open",
-        "/games?status=pending",
         "/games"
     ]
 
-    for ep in endpoints:
+    for path in urls:
         try:
-            data = api_get(ep)
+            r = requests.get(
+                BASE_URL + path,
+                headers=headers(),
+                timeout=10
+            )
+            r.raise_for_status()
 
-            with lock:
-                stats["scan"] += 1
+            data = r.json()
 
-            games = parse_games(data)
+            if isinstance(data, dict):
+                return data.get("data", []) or data.get("games", [])
 
-            room = choose_room(games)
-
-            if room:
-                print("ROOM FOUND:", room["id"])
-                return room["id"]
+            if isinstance(data, list):
+                return data
 
         except Exception as e:
-            with lock:
-                stats["server_fail"] += 1
+            print("SCAN FAIL:", path, e)
 
-            print("SCAN FAIL:", ep, e)
+    return []
 
-    return None
+def choose_room(rooms):
+    free_rooms = []
 
-# =====================================================
-# REGISTER
-# =====================================================
+    for g in rooms:
+        if g.get("entryType") == "free":
+            count = g.get("agentCount", 999)
+            max_count = g.get("maxAgents", 0)
 
-def register_agent(room_id):
-    payload = {
-        "name": f"BOT-{random.randint(1000,9999)}"
-    }
+            if count < max_count:
+                free_rooms.append(g)
 
-    data = api_post(
-        f"/games/{room_id}/agents/register",
-        payload
+    if not free_rooms:
+        return None
+
+    free_rooms.sort(
+        key=lambda x: x.get("agentCount", 999)
     )
 
-    if "data" in data:
-        return data["data"]["id"]
+    return free_rooms[0]
 
-    if "id" in data:
-        return data["id"]
+def join_room(room_id):
+    try:
+        r = requests.post(
+            f"{BASE_URL}/games/{room_id}/agents/register",
+            json={
+                "name": f"BOT-{random.randint(1000,9999)}"
+            },
+            headers=headers(),
+            timeout=10
+        )
 
-    raise Exception("REGISTER FAILED")
+        r.raise_for_status()
 
-# =====================================================
-# BOT LOOP
-# =====================================================
+        print("JOIN SUCCESS:", room_id)
+        print(r.text)
 
-def bot_loop():
-    while True:
-        try:
-            cfg = load_settings()
+        return True
 
-            if not cfg["running"]:
-                time.sleep(3)
-                continue
+    except Exception as e:
+        print("JOIN FAIL:", e)
+        return False
 
-            room_id = None
+while True:
+    try:
+        print("SCAN ROOM...")
 
-            # ------------------
-            # MANUAL MODE
-            # ------------------
-            if cfg["mode"] == "manual":
-                room_id = cfg["room_id"]
+        rooms = get_rooms()
 
-                if not room_id:
-                    print("MANUAL MODE: room kosong")
-                    time.sleep(5)
-                    continue
+        if not rooms:
+            print("NO ROOM FOUND")
+            time.sleep(ERROR_DELAY)
+            continue
 
-            # ------------------
-            # AUTO MODE
-            # ------------------
-            else:
-                room_id = auto_find_room()
+        room = choose_room(rooms)
 
-                if not room_id:
-                    print("AUTO MODE: no room")
-                    time.sleep(cfg["slow_scan"])
-                    continue
+        if not room:
+            print("NO EMPTY ROOM")
+            time.sleep(SCAN_DELAY)
+            continue
 
-            # ------------------
-            # JOIN
-            # ------------------
-            print("TRY JOIN:", room_id)
+        room_id = room["id"]
 
-            agent_id = register_agent(room_id)
+        print(
+            "TARGET:",
+            room.get("name", room_id),
+            f"{room.get('agentCount',0)}/{room.get('maxAgents',0)}"
+        )
 
-            with lock:
-                stats["join"] += 1
+        join_room(room_id)
 
-            print("JOIN SUCCESS:", agent_id)
+        time.sleep(SCAN_DELAY)
 
-            # placeholder play mode
-            time.sleep(10)
-
-        except Exception as e:
-            with lock:
-                stats["errors"] += 1
-
-            print("BOT ERROR:", e)
-            traceback.print_exc()
-            time.sleep(5)
-
-# =====================================================
-# FLASK APP
-# =====================================================
-
-app = Flask(__name__)
-
-@app.get("/")
-def home():
-    return jsonify({
-        "name": "Predator Hybrid Final",
-        "status": "online"
-    })
-
-@app.get("/api/settings")
-def get_settings():
-    return jsonify(load_settings())
-
-@app.post("/api/settings")
-def set_settings():
-    data = request.json
-    save_settings(data)
-    return jsonify({"ok": True})
-
-@app.get("/api/stats")
-def get_stats():
-    return jsonify(stats)
-
-@app.post("/api/start")
-def start():
-    cfg = load_settings()
-    cfg["running"] = True
-    save_settings(cfg)
-    return jsonify({"ok": True})
-
-@app.post("/api/stop")
-def stop():
-    cfg = load_settings()
-    cfg["running"] = False
-    save_settings(cfg)
-    return jsonify({"ok": True})
-
-# =====================================================
-# MAIN
-# =====================================================
-
-def start_background():
-    t = threading.Thread(
-        target=bot_loop,
-        daemon=True
-    )
-    t.start()
-
-start_background()
-
-if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=PORT)
+    except Exception as e:
+        print("MAIN ERROR:", e)
+        time.sleep(ERROR_DELAY)
