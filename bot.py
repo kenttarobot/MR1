@@ -1,25 +1,33 @@
 import os
 import time
 import random
-import traceback
 import threading
+import traceback
 import requests
 
 # =====================================================
-# PREDATOR V8 - FREE ROOM SNIPER
-# Fokus: masuk room FREE tercepat
+# PREDATOR V9 SMART SNIPER
+# - Fokus room FREE
+# - Anti 500
+# - Smart Backoff
+# - Multi Endpoint
+# - Railway Stable
 # =====================================================
 
 BASE_URL = os.getenv("BASE_URL", "https://cdn.moltyroyale.com/api")
 
 API_KEY = os.getenv("API_KEY")
 BOT_AGENT_NAME = os.getenv("BOT_AGENT_NAME", "SNIPER")
-BOT_INSTANCES = int(os.getenv("BOT_INSTANCES", "3"))
+BOT_INSTANCES = int(os.getenv("BOT_INSTANCES", "1"))
 
-# scan cepat
-RETRY_DELAY = float(os.getenv("RETRY_DELAY", "0.5"))
 TURN_DELAY = int(os.getenv("TURN_DELAY", "58"))
-REJOIN_DELAY = int(os.getenv("REJOIN_DELAY", "2"))
+REJOIN_DELAY = int(os.getenv("REJOIN_DELAY", "3"))
+
+# scan cepat saat sehat
+FAST_SCAN = float(os.getenv("FAST_SCAN", "0.5"))
+
+# backoff saat server rusak
+SLOW_SCAN = int(os.getenv("SLOW_SCAN", "15"))
 
 if not API_KEY:
     raise Exception("API_KEY belum diisi")
@@ -35,7 +43,8 @@ stats = {
     "join": 0,
     "wins": 0,
     "deaths": 0,
-    "errors": 0
+    "errors": 0,
+    "server_fail": 0
 }
 
 # =====================================================
@@ -77,51 +86,76 @@ def api_post(path, payload=None):
     return r.json()
 
 # =====================================================
-# GAME SNIPER
+# SMART ROOM FINDER
 # =====================================================
 
-def get_free_room():
-    try:
-        data = api_get("/games")
+def parse_games(data):
+    if isinstance(data, dict):
+        return data.get("data", []) or data.get("games", [])
 
-        with lock:
-            stats["scan"] += 1
+    if isinstance(data, list):
+        return data
 
-        games = []
+    return []
 
-        if isinstance(data, dict):
-            games = data.get("data", []) or data.get("games", [])
 
-        elif isinstance(data, list):
-            games = data
+def choose_best_room(games):
+    rooms = []
 
-        # filter room free + belum penuh
-        free_rooms = []
+    for g in games:
+        if g.get("entryType") != "free":
+            continue
 
-        for g in games:
-            if g.get("entryType") != "free":
-                continue
+        count = g.get("agentCount", 999)
+        max_count = g.get("maxAgents", 0)
 
-            count = g.get("agentCount", 999)
-            max_count = g.get("maxAgents", 0)
+        if count < max_count:
+            rooms.append(g)
 
-            if count < max_count:
-                free_rooms.append(g)
-
-        if not free_rooms:
-            return None
-
-        # urut room terbaru
-        free_rooms.sort(
-            key=lambda x: x.get("createdAt", ""),
-            reverse=True
-        )
-
-        return free_rooms[0]
-
-    except Exception as e:
-        print("SCAN ERROR:", e)
+    if not rooms:
         return None
+
+    # pilih paling kosong lalu paling baru
+    rooms.sort(
+        key=lambda x: (
+            x.get("agentCount", 999),
+            x.get("createdAt", "")
+        )
+    )
+
+    return rooms[0]
+
+
+def get_room():
+    endpoints = [
+        "/games?status=waiting",
+        "/games?status=open",
+        "/games?status=pending",
+        "/games"
+    ]
+
+    for ep in endpoints:
+        try:
+            data = api_get(ep)
+
+            with lock:
+                stats["scan"] += 1
+
+            games = parse_games(data)
+
+            room = choose_best_room(games)
+
+            if room:
+                print("ROOM FOUND:", ep)
+                return room
+
+        except Exception as e:
+            with lock:
+                stats["server_fail"] += 1
+
+            print("FAILED:", ep, e)
+
+    return None
 
 # =====================================================
 # REGISTER
@@ -146,7 +180,7 @@ def register_agent(game_id, index):
     raise Exception("REGISTER FAILED")
 
 # =====================================================
-# SIMPLE AI
+# AI SIMPLE
 # =====================================================
 
 def decide_action(state):
@@ -161,7 +195,7 @@ def decide_action(state):
                     "itemId": item["id"]
                 }
 
-    # enemy nearby
+    # attack player
     for a in state.get("visibleAgents", []):
         if a["isAlive"] and a["id"] != me["id"]:
             if a["regionId"] == me["regionId"]:
@@ -171,7 +205,7 @@ def decide_action(state):
                     "targetType": "agent"
                 }
 
-    # monster nearby
+    # attack monster
     for m in state.get("visibleMonsters", []):
         if m["regionId"] == me["regionId"]:
             return {
@@ -180,7 +214,7 @@ def decide_action(state):
                 "targetType": "monster"
             }
 
-    # loot
+    # pickup
     for item in state.get("visibleItems", []):
         if item["regionId"] == me["regionId"]:
             return {
@@ -236,25 +270,35 @@ def play_game(game_id, agent_id, index):
         time.sleep(TURN_DELAY)
 
 # =====================================================
-# THREAD LOOP
+# BOT LOOP
 # =====================================================
 
 def run_bot(index):
+    fail_streak = 0
+
     while True:
         try:
-            room = None
+            room = get_room()
 
-            while not room:
-                room = get_free_room()
+            if not room:
+                fail_streak += 1
 
-                if not room:
-                    print(f"[BOT {index}] WAIT FREE ROOM")
-                    time.sleep(RETRY_DELAY)
+                # smart backoff
+                if fail_streak >= 3:
+                    print(f"[BOT {index}] SERVER BAD, WAIT {SLOW_SCAN}s")
+                    time.sleep(SLOW_SCAN)
+                else:
+                    print(f"[BOT {index}] WAIT ROOM")
+                    time.sleep(FAST_SCAN)
+
+                continue
+
+            fail_streak = 0
 
             gid = room["id"]
 
             print(
-                f"[BOT {index}] FREE ROOM FOUND:",
+                f"[BOT {index}] JOIN TARGET:",
                 room.get("name", gid),
                 f"{room.get('agentCount',0)}/{room.get('maxAgents',0)}"
             )
@@ -277,7 +321,7 @@ def run_bot(index):
             print(f"[BOT {index}] MAIN ERROR:", e)
             traceback.print_exc()
 
-            time.sleep(RETRY_DELAY)
+            time.sleep(SLOW_SCAN)
 
 # =====================================================
 # MONITOR
@@ -287,12 +331,13 @@ def monitor():
     while True:
         with lock:
             print("===================================")
-            print("PREDATOR V8 FREE ROOM SNIPER")
-            print("Scan   :", stats["scan"])
-            print("Join   :", stats["join"])
-            print("Wins   :", stats["wins"])
-            print("Deaths :", stats["deaths"])
-            print("Errors :", stats["errors"])
+            print("PREDATOR V9 SMART SNIPER")
+            print("Scan       :", stats["scan"])
+            print("Join       :", stats["join"])
+            print("Wins       :", stats["wins"])
+            print("Deaths     :", stats["deaths"])
+            print("Errors     :", stats["errors"])
+            print("ServerFail :", stats["server_fail"])
             print("===================================")
 
         time.sleep(30)
@@ -303,7 +348,7 @@ def monitor():
 
 def main():
     print("===================================")
-    print("PREDATOR V8 FREE ROOM SNIPER")
+    print("PREDATOR V9 SMART SNIPER")
     print("Instances:", BOT_INSTANCES)
     print("===================================")
 
